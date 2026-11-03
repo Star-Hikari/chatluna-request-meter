@@ -1,0 +1,50 @@
+{
+  "name": "koishi-plugin-chatluna-request-meter",
+  "description": "Observe ChatLuna request body size and warn before provider limits (works with every adapter).",
+  "version": "0.1.0",
+  "main": "lib/index.js",
+  "typings": "lib/index.d.ts",
+  "files": [
+    "lib",
+    "dist"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/Star-Hikari/chatluna-request-meter#readme",
+  "bugs": {
+    "url": "https://github.com/Star-Hikari/chatluna-request-meter/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Star-Hikari/chatluna-request-meter.git"
+  },
+  "keywords": [
+    "chatbot",
+    "koishi",
+    "plugin",
+    "chatluna",
+    "request",
+    "body",
+    "image",
+    "limit"
+  ],
+  "scripts": {
+    "build": "node ../../node_modules/typescript/bin/tsc -b tsconfig.json --force && node ../../node_modules/esbuild/bin/esbuild src/index.ts --bundle --platform=node --format=cjs --target=es2022 --packages=external --outfile=lib/index.js",
+    "clean": "node ../../node_modules/typescript/bin/tsc -b tsconfig.json --clean",
+    "test": "node test/measure.test.cjs && node test/meter.test.cjs"
+  },
+  "peerDependencies": {
+    "koishi": "^4.18.7",
+    "koishi-plugin-chatluna": "^1.4.0"
+  },
+  "koishi": {
+    "description": {
+      "zh": "观测 ChatLuna 每个模型请求的请求体体积（尤其是 base64 图片），在接近供应商上限时告警，可选超限直接拦截。挂在 ModelRequester.post 上，DeepSeek / 千问 / OpenAI / MiMo 等全部适配器通用。",
+      "en": "Measure every ChatLuna model request body (especially inline base64 images), warn when approaching provider limits, and optionally block oversized requests. Patched at ModelRequester.post so it works for all adapters."
+    },
+    "service": {
+      "required": [
+        "chatluna"
+      ]
+    }
+  }
+}
