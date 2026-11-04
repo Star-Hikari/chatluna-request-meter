@@ -7,14 +7,17 @@ import {
   formatBytes,
   summarize,
 } from './measure'
+import { offloadImages, OffloadStorage } from './offload'
 
 // 供测试/排查复用
 export { describeImages, estimateBody, formatBytes, summarize } from './measure'
+export { isPrivateUrl, offloadImages } from './offload'
 
 export const name = 'chatluna-request-meter'
 
 export const inject = {
   required: ['chatluna'],
+  optional: ['chatluna_storage'],
 }
 
 export interface Config {
@@ -27,6 +30,12 @@ export interface Config {
   onlyChat: boolean
   breakdownTop: number
   cooldownSeconds: number
+  imageUrlMode: 'off' | 'offload'
+  offloadMinKb: number
+  offloadMaxPerRequest: number
+  offloadTtlHours: number
+  offloadPlatforms: string[]
+  offloadAllowLoopback: boolean
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -65,6 +74,33 @@ export const Config: Schema<Config> = Schema.object({
     .max(600)
     .default(30)
     .description('同一级别告警的去重冷却时间（秒），避免重试风暴刷屏。'),
+  imageUrlMode: Schema.union([
+    Schema.const('off').description('关闭：图片继续以 base64 内联在请求体里。'),
+    Schema.const('offload').description('转存：把 base64 图片上传到 chatluna_storage，请求体里只留公网 URL。'),
+  ])
+    .default('off')
+    .description('图片 URL 模式。offload 需要 chatluna_storage 且其 serverPath/S3 地址对供应商公网可达。'),
+  offloadMinKb: Schema.number()
+    .min(0)
+    .max(8192)
+    .default(64)
+    .description('小于该体积（KB）的图片不转存。'),
+  offloadMaxPerRequest: Schema.number()
+    .min(1)
+    .max(64)
+    .default(8)
+    .description('单个请求最多转存几张图片，防止一次上传过多。'),
+  offloadTtlHours: Schema.number()
+    .min(1)
+    .max(720)
+    .default(720)
+    .description('转存文件的临时有效期（小时）。需覆盖会话保留期，否则历史里的 URL 会失效。'),
+  offloadPlatforms: Schema.array(Schema.string())
+    .default(['deepseek'])
+    .description('允许使用 URL 模式的模型关键字（按 model 名匹配，如 deepseek / qwen）。留空表示全部。'),
+  offloadAllowLoopback: Schema.boolean()
+    .default(false)
+    .description('允许存储返回 127.0.0.1/内网地址（仅本地测试用；正式环境供应商抓不到）。'),
 })
 
 const CHAT_URL = /chat\/completions|responses/i
@@ -73,6 +109,9 @@ const PATCH_KEY = Symbol.for('chatluna.request-meter.patched')
 interface MeterState {
   config: Config | null
   logger: any
+  storage: OffloadStorage | null
+  warnedNoStorage: boolean
+  warnedPrivateUrl: boolean
   last: BodyEstimate | null
   lastAt: number
   lastModel?: string
@@ -87,6 +126,9 @@ interface MeterState {
 const state: MeterState = {
   config: null,
   logger: null,
+  storage: null,
+  warnedNoStorage: false,
+  warnedPrivateUrl: false,
   last: null,
   lastAt: 0,
   requests: 0,
@@ -190,22 +232,71 @@ export function apply(ctx: Context, config: Config) {
   state.config = config
   state.logger = logger
 
+  ctx.inject(['chatluna_storage'], (ctx2) => {
+    state.storage = (ctx2 as any).chatluna_storage ?? null
+    if (state.storage && state.config?.imageUrlMode === 'offload') {
+      logger.info('[request-meter] 已接入 chatluna_storage，图片可转存为公网 URL')
+    }
+  })
+
   const { ModelRequester } = require('koishi-plugin-chatluna/llm-core/platform/api')
   const proto = ModelRequester.prototype as any
 
   if (!proto[PATCH_KEY]) {
     const original = proto.post
     proto.post = function patchedPost(this: any, url: string, data: any, params?: any) {
-      try {
+      return (async () => {
         if (shouldMeasure(url)) {
-          const estimate = estimateBody(data)
-          report(url, data, estimate)
+          const current = state.config!
+          if (current.imageUrlMode === 'offload') {
+            if (!state.storage) {
+              if (!state.warnedNoStorage) {
+                state.warnedNoStorage = true
+                state.logger.warn(
+                  '[request-meter] imageUrlMode=offload 但 chatluna_storage 不可用，图片仍以内联 base64 发送',
+                )
+              }
+            } else {
+              try {
+                const result = await offloadImages(data, state.storage, {
+                  minBytes: current.offloadMinKb * 1024,
+                  maxPerRequest: current.offloadMaxPerRequest,
+                  allowLoopback: current.offloadAllowLoopback,
+                  ttlHours: current.offloadTtlHours,
+                  maxBytes: 32 * 1024 * 1024,
+                  platforms: current.offloadPlatforms,
+                })
+                if (result.offloaded > 0) {
+                  state.logger.info(
+                    `[request-meter] 已转存 ${result.offloaded} 张图片，请求体减少 ${formatBytes(result.savedBytes)}` +
+                      (result.failed > 0 ? `，${result.failed} 张失败保留 base64` : ''),
+                  )
+                } else if (result.failed > 0) {
+                  state.logger.warn(`[request-meter] ${result.failed} 张图片转存失败，已保留 base64`)
+                }
+                if (result.privateSkipped > 0 && !state.warnedPrivateUrl) {
+                  state.warnedPrivateUrl = true
+                  state.logger.warn(
+                    '[request-meter] 存储返回的是本机/内网地址，供应商无法抓取；' +
+                      '请把 chatluna-storage-service 的 serverPath 配成公网地址，或改用 s3/r2 后端',
+                  )
+                }
+              } catch (error) {
+                state.logger.warn('[request-meter] 图片转存失败，已跳过：', error)
+              }
+            }
+          }
+
+          try {
+            const estimate = estimateBody(data)
+            report(url, data, estimate)
+          } catch (error) {
+            if (error && (error as any).name === 'ChatLunaError') throw error
+            state.logger.warn('[request-meter] 体积估算失败，已跳过：', error)
+          }
         }
-      } catch (error) {
-        if (error && (error as any).name === 'ChatLunaError') throw error
-        logger.warn('[request-meter] 体积估算失败，已跳过：', error)
-      }
-      return original.call(this, url, data, params)
+        return original.call(this, url, data, params)
+      })()
     }
     proto[PATCH_KEY] = original
     logger.info('[request-meter] 已挂载到 ModelRequester.post（覆盖全部适配器）')

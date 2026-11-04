@@ -42,6 +42,34 @@ yarn add koishi-plugin-chatluna-request-meter
 
 开启 `abortEnabled` 后，超过 `abortMiB` 的请求会在发送前被拦截，并抛出 `ChatLunaError(ABORTED)`。
 
+## 图片 URL 模式（可选）
+
+ChatLuna 的 shared-adapter 在构建请求时会**无条件把图片下载并转成 base64**，等请求到达
+`ModelRequester.post` 时原始链接已经丢失。市场安装的插件不能修改 node_modules，因此本插件
+提供的是 **offload**：在发送前把 base64 图片转存到 `chatluna_storage`，请求体里只保留公网 URL。
+
+```yaml
+chatluna-request-meter:xxxx:
+  imageUrlMode: offload        # off（默认）/ offload
+  offloadMinKb: 64
+  offloadMaxPerRequest: 8
+  offloadTtlHours: 720
+  offloadPlatforms: [deepseek]
+  offloadAllowLoopback: false
+```
+
+使用前提：
+
+1. `chatluna-storage-service` 的 `serverPath` 必须是**供应商能访问的公网地址**（有固定公网 IP
+   可反代 `chatluna-storage`），或改用 `s3` / `r2` 后端；
+2. 目标模型支持 http(s) 图片输入（DeepSeek 支持，默认白名单 `deepseek`）；
+3. 存储配额要够（默认 500MB / 300 个文件），大图建议切 S3/R2 或调大上限。
+
+如果存储返回 `127.0.0.1`/内网地址，插件会跳过转存并保留 base64，同时打一条 warning。
+
+> 为什么不做"原链接透传"：`fetchImageUrl` 是 shared-adapter 内部的局部函数，运行时替换 exports
+> 无效；要透传只能给 node_modules 打补丁，而市场安装形态无法保证这一点。
+
 ## 统计内容
 
 - `body`：整个 JSON 请求体（文本 + 工具 schema + 图片）

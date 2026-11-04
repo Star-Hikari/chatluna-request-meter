@@ -7,14 +7,25 @@ require('koishi-plugin-chatluna')
 const { ModelRequester } = require('koishi-plugin-chatluna/llm-core/platform/api')
 const { ChatLunaErrorCode } = require('koishi-plugin-chatluna/utils/error')
 
-function makeCtx(logs) {
+function makeCtx(logs, storage) {
   const push = (level) => (...args) => logs.push([level, args.map(String).join(' ')])
-  return { logger: () => ({ debug: push('debug'), info: push('info'), warn: push('warn'), error: push('error') }), on: () => {} }
+  return {
+    logger: () => ({ debug: push('debug'), info: push('info'), warn: push('warn'), error: push('error') }),
+    on: () => {},
+    inject: (names, callback) => {
+      if (storage && names.includes('chatluna_storage')) callback({ chatluna_storage: storage })
+    },
+  }
 }
 
 function makeRequester(calls) {
   const req = Object.create(ModelRequester.prototype)
-  req._plugin = { fetch: async (url) => { calls.push(url); return { ok: true, text: async () => '' } } }
+  req._plugin = {
+    fetch: async (url, init) => {
+      calls.push({ url, body: init?.body })
+      return { ok: true, text: async () => '' }
+    },
+  }
   req._configPool = { getConfig: () => ({ value: { apiKey: 'sk-test', apiEndpoint: 'https://example.invalid/v1' } }) }
   return req
 }
@@ -80,6 +91,26 @@ const MiB = 1024 * 1024
   await req.post('embeddings', bodyWith(1, 30 * MiB), {})
   assert.ok(!logs.some(([l]) => l === 'warn' || l === 'error'), 'embeddings 不应告警')
   console.log('case4 embeddings ignored OK')
+
+  // 5) offload：post 发出的 body 里是公网 URL
+  logs.length = 0
+  calls.length = 0
+  const storage = {
+    createTempFile: async (buffer, filename) => ({ url: 'https://cdn.example.com/' + filename }),
+  }
+  apply(makeCtx(logs, storage), {
+    enabled: true, warnMiB: 1024, errorMiB: 1024, abortMiB: 1024,
+    abortEnabled: false, logEveryRequest: false, onlyChat: true,
+    breakdownTop: 3, cooldownSeconds: 0,
+    imageUrlMode: 'offload', offloadMinKb: 0, offloadMaxPerRequest: 8,
+    offloadTtlHours: 720, offloadPlatforms: ['deepseek'], offloadAllowLoopback: false,
+  })
+  await req.post('chat/completions', bodyWith(1, 100 * 1024), {})
+  const sent = JSON.parse(calls[0].body)
+  const sentUrl = sent.messages[0].content[0].image_url.url
+  assert.ok(sentUrl.startsWith('https://cdn.example.com/'), '应替换为公网 URL')
+  assert.ok(!calls[0].body.includes('data:image'), 'body 不应再含 base64')
+  console.log('case5 offload -> body has URL OK')
 
   const last = getLastEstimate()
   const stats = getStats()
