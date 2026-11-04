@@ -18,12 +18,24 @@ function makeCtx(logs, storage) {
   }
 }
 
-function makeRequester(calls) {
+function makeRequester(calls, uploads) {
   const req = Object.create(ModelRequester.prototype)
   req._plugin = {
     fetch: async (url, init) => {
+      if (uploads && String(url).includes('/files')) {
+        uploads.push(String(url))
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            id: `file-api-${uploads.length}`,
+            bytes: 100,
+            expires_at: Math.floor(Date.now() / 1000) + 3600,
+          }),
+        }
+      }
       calls.push({ url, body: init?.body })
-      return { ok: true, text: async () => '' }
+      return { ok: true, status: 200, text: async () => '' }
     },
   }
   req._configPool = { getConfig: () => ({ value: { apiKey: 'sk-test', apiEndpoint: 'https://example.invalid/v1' } }) }
@@ -34,8 +46,8 @@ function bodyWith(images, bytesEach) {
   const url = 'data:image/jpeg;base64,' + 'A'.repeat(Math.floor(bytesEach / 3) * 4)
   const messages = []
   for (let i = 0; i < images; i++) {
-    messages.push({ role: 'human', content: [{ type: 'image_url', image_url: { url } }] })
-    messages.push({ role: 'ai', content: 'ok' })
+    messages.push({ role: 'user', content: [{ type: 'image_url', image_url: { url } }] })
+    messages.push({ role: 'assistant', content: 'ok' })
   }
   return { model: 'deepseek-flash', messages }
 }
@@ -102,7 +114,7 @@ const MiB = 1024 * 1024
     enabled: true, warnMiB: 1024, errorMiB: 1024, abortMiB: 1024,
     abortEnabled: false, logEveryRequest: false, onlyChat: true,
     breakdownTop: 3, cooldownSeconds: 0,
-    imageUrlMode: 'offload', offloadMinKb: 0, offloadMaxPerRequest: 8,
+    imageMode: 'offload', offloadMinKb: 0, offloadMaxPerRequest: 8,
     offloadTtlHours: 720, offloadPlatforms: ['deepseek'], offloadAllowLoopback: false,
   })
   await req.post('chat/completions', bodyWith(1, 100 * 1024), {})
@@ -111,6 +123,30 @@ const MiB = 1024 * 1024
   assert.ok(sentUrl.startsWith('https://cdn.example.com/'), '应替换为公网 URL')
   assert.ok(!calls[0].body.includes('data:image'), 'body 不应再含 base64')
   console.log('case5 offload -> body has URL OK')
+
+  // 6) files：post 发出的 body 里是 file_id，且第二轮复用映射
+  logs.length = 0
+  calls.length = 0
+  const uploads = []
+  const filesReq = makeRequester(calls, uploads)
+  apply(makeCtx(logs), {
+    enabled: true, warnMiB: 1024, errorMiB: 1024, abortMiB: 1024,
+    abortEnabled: false, logEveryRequest: false, onlyChat: true,
+    breakdownTop: 3, cooldownSeconds: 0,
+    imageMode: 'files', filesTtlDays: 30, filesMaxPerRequest: 8, filesMinKb: 0,
+    filesRoles: ['user', 'tool'], filesPlatforms: ['deepseek'],
+    filesAccountScoped: true, filesUploadConcurrency: 2,
+  })
+  await filesReq.post('chat/completions', bodyWith(1, 100 * 1024), {})
+  const first = JSON.parse(calls[0].body)
+  assert.strictEqual(first.messages[0].content[0].type, 'file')
+  assert.ok(String(first.messages[0].content[0].file_id).startsWith('file-api-'))
+  assert.ok(!calls[0].body.includes('data:image'), 'files 模式 body 不应含 base64')
+  assert.strictEqual(uploads.length, 1, '首轮应上传一次')
+
+  await filesReq.post('chat/completions', bodyWith(1, 100 * 1024), {})
+  assert.strictEqual(uploads.length, 1, '第二轮应复用映射，不重复上传')
+  console.log('case6 files -> file_id + reuse OK')
 
   const last = getLastEstimate()
   const stats = getStats()

@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-chatluna-request-meter",
   "description": "Observe ChatLuna request body size and warn before provider limits (works with every adapter).",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -30,7 +30,7 @@
   "scripts": {
     "build": "node ../../node_modules/typescript/bin/tsc -b tsconfig.json --force && node ../../node_modules/esbuild/bin/esbuild src/index.ts --bundle --platform=node --format=cjs --target=es2022 --packages=external --outfile=lib/index.js",
     "clean": "node ../../node_modules/typescript/bin/tsc -b tsconfig.json --clean",
-    "test": "node test/measure.test.cjs && node test/offload.test.cjs && node test/meter.test.cjs"
+    "test": "node test/measure.test.cjs && node test/offload.test.cjs && node test/files-uploader.test.cjs && node test/files-transform.test.cjs && node test/meter.test.cjs"
   },
   "peerDependencies": {
     "koishi": "^4.18.7",
@@ -46,7 +46,8 @@
         "chatluna"
       ],
       "optional": [
-        "chatluna_storage"
+        "chatluna_storage",
+        "database"
       ]
     }
   }

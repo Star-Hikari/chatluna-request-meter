@@ -1,5 +1,6 @@
 import type { Context } from 'koishi'
 import { Schema } from 'koishi'
+import { createHash } from 'node:crypto'
 import {
   BodyEstimate,
   describeImages,
@@ -8,17 +9,25 @@ import {
   summarize,
 } from './measure'
 import { offloadImages, OffloadStorage } from './offload'
+import { FilesUploader } from './files/uploader'
+import { DatabaseBackend, FileStore, MemoryBackend } from './files/store'
+import { FilesTransformResult, transformToFiles } from './files/transform'
 
 // 供测试/排查复用
 export { describeImages, estimateBody, formatBytes, summarize } from './measure'
 export { isPrivateUrl, offloadImages } from './offload'
+export { FilesUploadError, FilesUploader } from './files/uploader'
+export { DatabaseBackend, FileStore, MemoryBackend } from './files/store'
+export { transformToFiles } from './files/transform'
 
 export const name = 'chatluna-request-meter'
 
 export const inject = {
   required: ['chatluna'],
-  optional: ['chatluna_storage'],
+  optional: ['chatluna_storage', 'database'],
 }
+
+const FILES_TABLE = 'chatluna_request_meter_file'
 
 export interface Config {
   enabled: boolean
@@ -30,12 +39,19 @@ export interface Config {
   onlyChat: boolean
   breakdownTop: number
   cooldownSeconds: number
-  imageUrlMode: 'off' | 'offload'
+  imageMode: 'inline' | 'offload' | 'files'
   offloadMinKb: number
   offloadMaxPerRequest: number
   offloadTtlHours: number
   offloadPlatforms: string[]
   offloadAllowLoopback: boolean
+  filesTtlDays: number
+  filesMaxPerRequest: number
+  filesMinKb: number
+  filesRoles: string[]
+  filesPlatforms: string[]
+  filesAccountScoped: boolean
+  filesUploadConcurrency: number
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -74,12 +90,13 @@ export const Config: Schema<Config> = Schema.object({
     .max(600)
     .default(30)
     .description('同一级别告警的去重冷却时间（秒），避免重试风暴刷屏。'),
-  imageUrlMode: Schema.union([
-    Schema.const('off').description('关闭：图片继续以 base64 内联在请求体里。'),
+  imageMode: Schema.union([
+    Schema.const('inline').description('内联：图片继续以 base64 放在请求体里（默认，行为不变）。'),
     Schema.const('offload').description('转存：把 base64 图片上传到 chatluna_storage，请求体里只留公网 URL。'),
+    Schema.const('files').description('Files API：把 base64 图片上传到 DeepSeek，请求体里只留 file_id。'),
   ])
-    .default('off')
-    .description('图片 URL 模式。offload 需要 chatluna_storage 且其 serverPath/S3 地址对供应商公网可达。'),
+    .default('inline')
+    .description('图片发送模式。offload 需要 chatluna_storage 的公网地址；files 只支持 DeepSeek。'),
   offloadMinKb: Schema.number()
     .min(0)
     .max(8192)
@@ -101,17 +118,51 @@ export const Config: Schema<Config> = Schema.object({
   offloadAllowLoopback: Schema.boolean()
     .default(false)
     .description('允许存储返回 127.0.0.1/内网地址（仅本地测试用；正式环境供应商抓不到）。'),
+  filesTtlDays: Schema.number()
+    .min(0)
+    .max(30)
+    .default(30)
+    .description('Files API 文件有效期（天），0 = 永久（需要自行清理）。'),
+  filesMaxPerRequest: Schema.number()
+    .min(1)
+    .max(64)
+    .default(8)
+    .description('单个请求最多把几张图片转成 file_id。'),
+  filesMinKb: Schema.number()
+    .min(0)
+    .max(8192)
+    .default(0)
+    .description('小于该体积（KB）的图片不转 file_id。'),
+  filesRoles: Schema.array(Schema.string())
+    .default(['user', 'tool'])
+    .description('允许重写为 file 块的消息角色。tool 已实测可用，但属未文档化行为。'),
+  filesPlatforms: Schema.array(Schema.string())
+    .default(['deepseek'])
+    .description('允许使用 Files API 的模型关键字（按 model 名匹配）。'),
+  filesAccountScoped: Schema.boolean()
+    .default(true)
+    .description('按 API key 隔离 file_id 映射（多账号时避免跨账号引用）。'),
+  filesUploadConcurrency: Schema.number()
+    .min(1)
+    .max(16)
+    .default(4)
+    .description('首次上传时的并发数。'),
 })
 
 const CHAT_URL = /chat\/completions|responses/i
 const PATCH_KEY = Symbol.for('chatluna.request-meter.patched')
+const FILES_MAX_BYTES = 64 * 1024 * 1024
 
 interface MeterState {
   config: Config | null
   logger: any
   storage: OffloadStorage | null
+  filesStore: FileStore | null
+  filesBackend: 'memory' | 'database' | null
+  uploaders: Map<string, FilesUploader>
   warnedNoStorage: boolean
   warnedPrivateUrl: boolean
+  warnedNoFiles: boolean
   last: BodyEstimate | null
   lastAt: number
   lastModel?: string
@@ -127,8 +178,12 @@ const state: MeterState = {
   config: null,
   logger: null,
   storage: null,
+  filesStore: null,
+  filesBackend: null,
+  uploaders: new Map(),
   warnedNoStorage: false,
   warnedPrivateUrl: false,
+  warnedNoFiles: false,
   last: null,
   lastAt: 0,
   requests: 0,
@@ -151,6 +206,7 @@ export function getStats() {
     maxBytes: state.maxBytes,
     lastAt: state.lastAt,
     lastModel: state.lastModel,
+    filesBackend: state.filesBackend,
   }
 }
 
@@ -227,14 +283,169 @@ function createAbortError(estimate: BodyEstimate, config: Config): Error {
   )
 }
 
+function modelAllowed(model: unknown, platforms: string[]): boolean {
+  if (platforms.length === 0) return true
+  const name = String(model ?? '').toLowerCase()
+  return platforms.some((platform) => name.includes(platform.toLowerCase()))
+}
+
+function accountKeyOf(apiKey: string, scoped: boolean): string {
+  if (!scoped) return 'shared'
+  return createHash('sha256').update(apiKey).digest('hex').slice(0, 16)
+}
+
+interface FilesRun {
+  result: FilesTransformResult
+  accountKey: string
+}
+
+async function runFilesMode(requester: any, data: any, config: Config): Promise<FilesRun | null> {
+  if (!state.filesStore) {
+    if (!state.warnedNoFiles) {
+      state.warnedNoFiles = true
+      state.logger.warn('[request-meter] imageMode=files 但映射存储不可用，图片仍以内联 base64 发送')
+    }
+    return null
+  }
+  if (!modelAllowed(data?.model, config.filesPlatforms)) return null
+
+  let apiKey: string | undefined
+  let filesUrl: string | undefined
+  try {
+    const platformConfig = requester?._config?.value
+    apiKey = platformConfig?.apiKey
+    if (!apiKey) return null
+    filesUrl = requester.concatUrl('files')
+  } catch (error) {
+    if (!state.warnedNoFiles) {
+      state.warnedNoFiles = true
+      state.logger.warn('[request-meter] 无法获取 Files API 配置，跳过 file 转换：', error)
+    }
+    return null
+  }
+  if (!filesUrl) return null
+
+  const accountKey = accountKeyOf(apiKey, config.filesAccountScoped)
+  const cacheKey = `${accountKey}|${filesUrl}`
+  let uploader = state.uploaders.get(cacheKey)
+  if (!uploader) {
+    uploader = new FilesUploader({
+      fetchImpl: (url, init) => requester._plugin.fetch(url, init),
+      apiKey,
+      filesUrl,
+      ttlSeconds: config.filesTtlDays * 86_400,
+    })
+    state.uploaders.set(cacheKey, uploader)
+  }
+
+  const result = await transformToFiles(data, {
+    roles: config.filesRoles,
+    minBytes: config.filesMinKb * 1024,
+    maxBytes: FILES_MAX_BYTES,
+    maxPerRequest: config.filesMaxPerRequest,
+    concurrency: config.filesUploadConcurrency,
+    uploader,
+    store: state.filesStore,
+    accountKey,
+    logger: state.logger,
+  })
+
+  if (result.rewritten > 0) {
+    state.logger.info(
+      `[request-meter] file 模式：改写 ${result.rewritten} 张（上传 ${result.uploaded}，复用 ${result.reused}），` +
+        `请求体减少 ${formatBytes(result.savedBytes)}` +
+        (result.failed > 0 ? `，${result.failed} 张失败保留 base64` : ''),
+    )
+  } else if (result.failed > 0) {
+    state.logger.warn(`[request-meter] ${result.failed} 张图片转 file_id 失败，已保留 base64`)
+  }
+
+  return { result, accountKey }
+}
+
+async function invalidateFiles(run: FilesRun) {
+  if (!state.filesStore || run.result.used.length === 0) return
+  for (const used of run.result.used) {
+    await state.filesStore.remove(run.accountKey, used.hash)
+  }
+  state.logger.warn(
+    `[request-meter] 请求返回 400，已作废 ${run.result.used.length} 条 file 映射（下一轮会重新上传）`,
+  )
+}
+
+async function runOffloadMode(data: any, config: Config) {
+  if (!state.storage) {
+    if (!state.warnedNoStorage) {
+      state.warnedNoStorage = true
+      state.logger.warn('[request-meter] imageMode=offload 但 chatluna_storage 不可用，图片仍以内联 base64 发送')
+    }
+    return
+  }
+  try {
+    const result = await offloadImages(data, state.storage, {
+      minBytes: config.offloadMinKb * 1024,
+      maxPerRequest: config.offloadMaxPerRequest,
+      allowLoopback: config.offloadAllowLoopback,
+      ttlHours: config.offloadTtlHours,
+      maxBytes: 32 * 1024 * 1024,
+      platforms: config.offloadPlatforms,
+    })
+    if (result.offloaded > 0) {
+      state.logger.info(
+        `[request-meter] 已转存 ${result.offloaded} 张图片，请求体减少 ${formatBytes(result.savedBytes)}` +
+          (result.failed > 0 ? `，${result.failed} 张失败保留 base64` : ''),
+      )
+    } else if (result.failed > 0) {
+      state.logger.warn(`[request-meter] ${result.failed} 张图片转存失败，已保留 base64`)
+    }
+    if (result.privateSkipped > 0 && !state.warnedPrivateUrl) {
+      state.warnedPrivateUrl = true
+      state.logger.warn(
+        '[request-meter] 存储返回的是本机/内网地址，供应商无法抓取；' +
+          '请把 chatluna-storage-service 的 serverPath 配成公网地址，或改用 s3/r2 后端',
+      )
+    }
+  } catch (error) {
+    state.logger.warn('[request-meter] 图片转存失败，已跳过：', error)
+  }
+}
+
 export function apply(ctx: Context, config: Config) {
   const logger = ctx.logger('request-meter')
   state.config = config
   state.logger = logger
 
+  // 默认先给内存映射，数据库可用时再覆盖
+  if (!state.filesStore) {
+    state.filesStore = new FileStore(new MemoryBackend(), logger)
+    state.filesBackend = 'memory'
+  }
+
+  ctx.inject(['database'], (ctx2) => {
+    try {
+      const model = (ctx2 as any).model
+      model?.extend?.(FILES_TABLE, {
+        id: 'string',
+        accountKey: 'string',
+        hash: 'string',
+        fileId: 'string',
+        bytes: 'unsigned',
+        mime: 'string',
+        createdAt: 'timestamp',
+        expiresAt: 'timestamp',
+        lastUsedAt: 'timestamp',
+      })
+      state.filesStore = new FileStore(new DatabaseBackend((ctx2 as any).database, FILES_TABLE, logger), logger)
+      state.filesBackend = 'database'
+      logger.info('[request-meter] 已使用数据库保存 file_id 映射，重启后可复用')
+    } catch (error) {
+      logger.warn('[request-meter] 初始化 file 映射表失败，退回内存存储：', error)
+    }
+  })
+
   ctx.inject(['chatluna_storage'], (ctx2) => {
     state.storage = (ctx2 as any).chatluna_storage ?? null
-    if (state.storage && state.config?.imageUrlMode === 'offload') {
+    if (state.storage && state.config?.imageMode === 'offload') {
       logger.info('[request-meter] 已接入 chatluna_storage，图片可转存为公网 URL')
     }
   })
@@ -246,45 +457,18 @@ export function apply(ctx: Context, config: Config) {
     const original = proto.post
     proto.post = function patchedPost(this: any, url: string, data: any, params?: any) {
       return (async () => {
+        let filesRun: FilesRun | null = null
+
         if (shouldMeasure(url)) {
           const current = state.config!
-          if (current.imageUrlMode === 'offload') {
-            if (!state.storage) {
-              if (!state.warnedNoStorage) {
-                state.warnedNoStorage = true
-                state.logger.warn(
-                  '[request-meter] imageUrlMode=offload 但 chatluna_storage 不可用，图片仍以内联 base64 发送',
-                )
-              }
-            } else {
-              try {
-                const result = await offloadImages(data, state.storage, {
-                  minBytes: current.offloadMinKb * 1024,
-                  maxPerRequest: current.offloadMaxPerRequest,
-                  allowLoopback: current.offloadAllowLoopback,
-                  ttlHours: current.offloadTtlHours,
-                  maxBytes: 32 * 1024 * 1024,
-                  platforms: current.offloadPlatforms,
-                })
-                if (result.offloaded > 0) {
-                  state.logger.info(
-                    `[request-meter] 已转存 ${result.offloaded} 张图片，请求体减少 ${formatBytes(result.savedBytes)}` +
-                      (result.failed > 0 ? `，${result.failed} 张失败保留 base64` : ''),
-                  )
-                } else if (result.failed > 0) {
-                  state.logger.warn(`[request-meter] ${result.failed} 张图片转存失败，已保留 base64`)
-                }
-                if (result.privateSkipped > 0 && !state.warnedPrivateUrl) {
-                  state.warnedPrivateUrl = true
-                  state.logger.warn(
-                    '[request-meter] 存储返回的是本机/内网地址，供应商无法抓取；' +
-                      '请把 chatluna-storage-service 的 serverPath 配成公网地址，或改用 s3/r2 后端',
-                  )
-                }
-              } catch (error) {
-                state.logger.warn('[request-meter] 图片转存失败，已跳过：', error)
-              }
+          if (current.imageMode === 'files') {
+            try {
+              filesRun = await runFilesMode(this, data, current)
+            } catch (error) {
+              state.logger.warn('[request-meter] file 模式处理失败，已跳过：', error)
             }
+          } else if (current.imageMode === 'offload') {
+            await runOffloadMode(data, current)
           }
 
           try {
@@ -295,7 +479,12 @@ export function apply(ctx: Context, config: Config) {
             state.logger.warn('[request-meter] 体积估算失败，已跳过：', error)
           }
         }
-        return original.call(this, url, data, params)
+
+        const response = await original.call(this, url, data, params)
+        if (filesRun && filesRun.result.used.length > 0 && response && response.status === 400) {
+          await invalidateFiles(filesRun)
+        }
+        return response
       })()
     }
     proto[PATCH_KEY] = original
