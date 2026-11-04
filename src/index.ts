@@ -54,100 +54,117 @@ export interface Config {
   filesUploadConcurrency: number
 }
 
-export const Config: Schema<Config> = Schema.object({
-  enabled: Schema.boolean().default(true).description('是否启用请求体体积观测。'),
-  warnMiB: Schema.number()
-    .min(1)
-    .max(1024)
-    .default(24)
-    .description('超过该体积（MiB）记 warning。建议设为供应商上限的 50%。'),
-  errorMiB: Schema.number()
-    .min(1)
-    .max(1024)
-    .default(38)
-    .description('超过该体积（MiB）记 error。建议设为上限的 80%。'),
-  abortMiB: Schema.number()
-    .min(1)
-    .max(1024)
-    .default(45)
-    .description('超过该体积（MiB）时拦截请求的阈值，仅在“启用拦截”时生效。'),
-  abortEnabled: Schema.boolean()
-    .default(false)
-    .description('是否在超过 abortMiB 时直接拦截请求，避免重试 18 次把同样的超大请求反复发出去。默认关闭，只记录。'),
-  logEveryRequest: Schema.boolean()
-    .default(false)
-    .description('每次请求都打 debug 日志（排查时打开）。'),
-  onlyChat: Schema.boolean()
-    .default(true)
-    .description('只观测 chat/completions 与 responses 请求，忽略 embeddings/rerank。'),
-  breakdownTop: Schema.number()
-    .min(0)
-    .max(10)
-    .default(3)
-    .description('日志里列出体积最大的前 N 张图片（0 = 不列）。'),
-  cooldownSeconds: Schema.number()
-    .min(0)
-    .max(600)
-    .default(30)
-    .description('同一级别告警的去重冷却时间（秒），避免重试风暴刷屏。'),
-  imageMode: Schema.union([
-    Schema.const('inline').description('内联：图片继续以 base64 放在请求体里（默认，行为不变）。'),
-    Schema.const('offload').description('转存：把 base64 图片上传到 chatluna_storage，请求体里只留公网 URL。'),
-    Schema.const('files').description('Files API：把 base64 图片上传到 DeepSeek，请求体里只留 file_id。'),
-  ])
-    .default('inline')
-    .description('图片发送模式。offload 需要 chatluna_storage 的公网地址；files 只支持 DeepSeek。'),
-  offloadMinKb: Schema.number()
-    .min(0)
-    .max(8192)
-    .default(64)
-    .description('小于该体积（KB）的图片不转存。'),
-  offloadMaxPerRequest: Schema.number()
-    .min(1)
-    .max(64)
-    .default(8)
-    .description('单个请求最多转存几张图片，防止一次上传过多。'),
-  offloadTtlHours: Schema.number()
-    .min(1)
-    .max(720)
-    .default(720)
-    .description('转存文件的临时有效期（小时）。需覆盖会话保留期，否则历史里的 URL 会失效。'),
-  offloadPlatforms: Schema.array(Schema.string())
-    .default(['deepseek'])
-    .description('允许使用 URL 模式的模型关键字（按 model 名匹配，如 deepseek / qwen）。留空表示全部。'),
-  offloadAllowLoopback: Schema.boolean()
-    .default(false)
-    .description('允许存储返回 127.0.0.1/内网地址（仅本地测试用；正式环境供应商抓不到）。'),
-  filesTtlDays: Schema.number()
-    .min(0)
-    .max(30)
-    .default(30)
-    .description('Files API 文件有效期（天），0 = 永久（需要自行清理）。'),
-  filesMaxPerRequest: Schema.number()
-    .min(1)
-    .max(64)
-    .default(8)
-    .description('单个请求最多把几张图片转成 file_id。'),
-  filesMinKb: Schema.number()
-    .min(0)
-    .max(8192)
-    .default(0)
-    .description('小于该体积（KB）的图片不转 file_id。'),
-  filesRoles: Schema.array(Schema.string())
-    .default(['user', 'tool'])
-    .description('允许重写为 file 块的消息角色。tool 已实测可用，但属未文档化行为。'),
-  filesPlatforms: Schema.array(Schema.string())
-    .default(['deepseek'])
-    .description('允许使用 Files API 的模型关键字（按 model 名匹配）。'),
-  filesAccountScoped: Schema.boolean()
-    .default(true)
-    .description('按 API key 隔离 file_id 映射（多账号时避免跨账号引用）。'),
-  filesUploadConcurrency: Schema.number()
-    .min(1)
-    .max(16)
-    .default(4)
-    .description('首次上传时的并发数。'),
-})
+export const Config = Schema.intersect([
+  Schema.object({
+    enabled: Schema.boolean().default(true).description('是否启用请求体体积观测。'),
+  }).description('基础'),
+
+  Schema.object({
+    warnMiB: Schema.number()
+      .min(1)
+      .max(1024)
+      .default(24)
+      .description('超过该体积（MiB）记 warning。建议设为供应商上限的 50%。'),
+    errorMiB: Schema.number()
+      .min(1)
+      .max(1024)
+      .default(38)
+      .description('超过该体积（MiB）记 error。建议设为上限的 80%。'),
+    abortMiB: Schema.number()
+      .min(1)
+      .max(1024)
+      .default(45)
+      .description('超过该体积（MiB）时拦截请求的阈值，仅在“启用拦截”时生效。'),
+    abortEnabled: Schema.boolean()
+      .default(false)
+      .description('是否在超过 abortMiB 时直接拦截请求，避免重试 18 次把同样的超大请求反复发出去。默认关闭，只记录。'),
+    cooldownSeconds: Schema.number()
+      .min(0)
+      .max(600)
+      .default(30)
+      .description('同一级别告警的去重冷却时间（秒），避免重试风暴刷屏。'),
+  }).description('体积告警'),
+
+  Schema.object({
+    onlyChat: Schema.boolean()
+      .default(true)
+      .description('只观测 chat/completions 与 responses 请求，忽略 embeddings/rerank。'),
+    logEveryRequest: Schema.boolean()
+      .default(false)
+      .description('每次请求都打 debug 日志（排查时打开）。'),
+    breakdownTop: Schema.number()
+      .min(0)
+      .max(10)
+      .default(3)
+      .description('日志里列出体积最大的前 N 张图片（0 = 不列）。'),
+  }).description('观测范围与日志'),
+
+  Schema.object({
+    imageMode: Schema.union([
+      Schema.const('inline').description('内联：图片继续以 base64 放在请求体里（默认，行为不变）。'),
+      Schema.const('offload').description('转存：把 base64 图片上传到 chatluna_storage，请求体里只留公网 URL。'),
+      Schema.const('files').description('Files API：把 base64 图片上传到 DeepSeek，请求体里只留 file_id。'),
+    ])
+      .default('inline')
+      .description('图片发送模式。offload 需要 chatluna_storage 的公网地址；files 只支持 DeepSeek。'),
+  }).description('图片发送模式'),
+
+  Schema.object({
+    offloadMinKb: Schema.number()
+      .min(0)
+      .max(8192)
+      .default(64)
+      .description('小于该体积（KB）的图片不转存。'),
+    offloadMaxPerRequest: Schema.number()
+      .min(1)
+      .max(64)
+      .default(8)
+      .description('单个请求最多转存几张图片，防止一次上传过多。'),
+    offloadTtlHours: Schema.number()
+      .min(1)
+      .max(720)
+      .default(720)
+      .description('转存文件的临时有效期（小时）。需覆盖会话保留期，否则历史里的 URL 会失效。'),
+    offloadPlatforms: Schema.array(Schema.string())
+      .default(['deepseek'])
+      .description('允许使用 URL 模式的模型关键字（按 model 名匹配，如 deepseek / qwen）。留空表示全部。'),
+    offloadAllowLoopback: Schema.boolean()
+      .default(false)
+      .description('允许存储返回 127.0.0.1/内网地址（仅本地测试用；正式环境供应商抓不到）。'),
+  }).description('offload：转存为公网 URL'),
+
+  Schema.object({
+    filesTtlDays: Schema.number()
+      .min(0)
+      .max(30)
+      .default(30)
+      .description('Files API 文件有效期（天），0 = 永久（需要自行清理）。'),
+    filesMaxPerRequest: Schema.number()
+      .min(1)
+      .max(64)
+      .default(8)
+      .description('单个请求最多把几张图片转成 file_id。'),
+    filesMinKb: Schema.number()
+      .min(0)
+      .max(8192)
+      .default(0)
+      .description('小于该体积（KB）的图片不转 file_id。'),
+    filesRoles: Schema.array(Schema.string())
+      .default(['user', 'tool'])
+      .description('允许重写为 file 块的消息角色。tool 已实测可用，但属未文档化行为。'),
+    filesPlatforms: Schema.array(Schema.string())
+      .default(['deepseek'])
+      .description('允许使用 Files API 的模型关键字（按 model 名匹配）。'),
+    filesAccountScoped: Schema.boolean()
+      .default(true)
+      .description('按 API key 隔离 file_id 映射（多账号时避免跨账号引用）。'),
+    filesUploadConcurrency: Schema.number()
+      .min(1)
+      .max(16)
+      .default(4)
+      .description('首次上传时的并发数。'),
+  }).description('Files API：转存为 file_id'),
+]) as Schema<Config>
 
 const CHAT_URL = /chat\/completions|responses/i
 const PATCH_KEY = Symbol.for('chatluna.request-meter.patched')
