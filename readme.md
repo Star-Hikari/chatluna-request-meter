@@ -1,6 +1,6 @@
 # koishi-plugin-chatluna-request-meter
 
-观测 ChatLuna 每次模型请求的**请求体字节数**，在接近供应商上限时告警，可选超限直接拦截。
+观测 ChatLuna 每次模型请求的**请求体字节数**，在接近供应商上限时告警，实现了适配器不再以base64内联图片发送请求，支持改为公网链接或Files API方式上传图片
 
 ## 为什么需要它
 
@@ -8,8 +8,7 @@ ChatLuna 会把历史里的图片转成 base64 并**每轮重发**，而图片�
 （`getMessageContent` 只拼 text 块），所以 token 一直"正常"，请求体却可能已经接近供应商上限
 （DeepSeek 为 48 MiB）。等撞到 413 时，重试会把同一个超大请求反复发出去。
 
-本插件挂在 `ModelRequester.prototype.post` 上——这是所有适配器（DeepSeek / 千问 / OpenAI /
-MiMo 等）的唯一出口，因此**一处生效、全平台通用**。
+本插件挂在 `ModelRequester.prototype.post` 上——这是所有适配器（DeepSeek / 千问 / OpenAI 等）的唯一出口，因此**一处生效、全平台通用**。
 
 ## 安装
 
