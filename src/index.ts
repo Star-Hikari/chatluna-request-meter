@@ -109,61 +109,67 @@ export const Config = Schema.intersect([
       .description('图片发送模式。offload 需要 chatluna_storage 的公网地址；files 只支持 DeepSeek。'),
   }).description('图片发送模式'),
 
-  Schema.object({
-    offloadMinKb: Schema.number()
-      .min(0)
-      .max(8192)
-      .default(64)
-      .description('小于该体积（KB）的图片不转存。'),
-    offloadMaxPerRequest: Schema.number()
-      .min(1)
-      .max(64)
-      .default(8)
-      .description('单个请求最多转存几张图片，防止一次上传过多。'),
-    offloadTtlHours: Schema.number()
-      .min(1)
-      .max(720)
-      .default(720)
-      .description('转存文件的临时有效期（小时）。需覆盖会话保留期，否则历史里的 URL 会失效。'),
-    offloadPlatforms: Schema.array(Schema.string())
-      .default(['deepseek'])
-      .description('允许使用 URL 模式的模型关键字（按 model 名匹配，如 deepseek / qwen）。留空表示全部。'),
-    offloadAllowLoopback: Schema.boolean()
-      .default(false)
-      .description('允许存储返回 127.0.0.1/内网地址（仅本地测试用；正式环境供应商抓不到）。'),
-  }).description('offload：转存为公网 URL'),
+  Schema.union([
+    Schema.object({
+      imageMode: Schema.const('offload').required(),
+      offloadMinKb: Schema.number()
+        .min(0)
+        .max(8192)
+        .default(64)
+        .description('小于该体积（KB）的图片不转存。'),
+      offloadMaxPerRequest: Schema.number()
+        .min(1)
+        .max(64)
+        .default(8)
+        .description('单个请求最多转存几张图片，防止一次上传过多。'),
+      offloadTtlHours: Schema.number()
+        .min(1)
+        .max(720)
+        .default(720)
+        .description('转存文件的临时有效期（小时）。需覆盖会话保留期，否则历史里的 URL 会失效。'),
+      offloadPlatforms: Schema.array(Schema.string())
+        .default(['deepseek'])
+        .description('允许使用 URL 模式的模型关键字（按 model 名匹配，如 deepseek / qwen）。留空表示全部。'),
+      offloadAllowLoopback: Schema.boolean()
+        .default(false)
+        .description('允许存储返回 127.0.0.1/内网地址（仅本地测试用；正式环境供应商抓不到）。'),
+    }).description('offload：转存为公网 URL'),
 
-  Schema.object({
-    filesTtlDays: Schema.number()
-      .min(0)
-      .max(30)
-      .default(30)
-      .description('Files API 文件有效期（天），0 = 永久（需要自行清理）。'),
-    filesMaxPerRequest: Schema.number()
-      .min(1)
-      .max(64)
-      .default(8)
-      .description('单个请求最多把几张图片转成 file_id。'),
-    filesMinKb: Schema.number()
-      .min(0)
-      .max(8192)
-      .default(0)
-      .description('小于该体积（KB）的图片不转 file_id。'),
-    filesRoles: Schema.array(Schema.string())
-      .default(['user', 'tool'])
-      .description('允许重写为 file 块的消息角色。tool 已实测可用，但属未文档化行为。'),
-    filesPlatforms: Schema.array(Schema.string())
-      .default(['deepseek'])
-      .description('允许使用 Files API 的模型关键字（按 model 名匹配）。'),
-    filesAccountScoped: Schema.boolean()
-      .default(true)
-      .description('按 API key 隔离 file_id 映射（多账号时避免跨账号引用）。'),
-    filesUploadConcurrency: Schema.number()
-      .min(1)
-      .max(16)
-      .default(4)
-      .description('首次上传时的并发数。'),
-  }).description('Files API：转存为 file_id'),
+    Schema.object({
+      imageMode: Schema.const('files').required(),
+      filesTtlDays: Schema.number()
+        .min(0)
+        .max(30)
+        .default(30)
+        .description('Files API 文件有效期（天），0 = 永久（需要自行清理）。'),
+      filesMaxPerRequest: Schema.number()
+        .min(1)
+        .max(64)
+        .default(8)
+        .description('单个请求最多把几张图片转成 file_id。'),
+      filesMinKb: Schema.number()
+        .min(0)
+        .max(8192)
+        .default(0)
+        .description('小于该体积（KB）的图片不转 file_id。'),
+      filesRoles: Schema.array(Schema.string())
+        .default(['user', 'tool'])
+        .description('允许重写为 file 块的消息角色。tool 已实测可用，但属未文档化行为。'),
+      filesPlatforms: Schema.array(Schema.string())
+        .default(['deepseek'])
+        .description('允许使用 Files API 的模型关键字（按 model 名匹配）。'),
+      filesAccountScoped: Schema.boolean()
+        .default(true)
+        .description('按 API key 隔离 file_id 映射（多账号时避免跨账号引用）。'),
+      filesUploadConcurrency: Schema.number()
+        .min(1)
+        .max(16)
+        .default(4)
+        .description('首次上传时的并发数。'),
+    }).description('Files API：转存为 file_id'),
+
+    Schema.object({}),
+  ]),
 ]) as Schema<Config>
 
 const CHAT_URL = /chat\/completions|responses/i
