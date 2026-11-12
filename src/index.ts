@@ -9,6 +9,7 @@ import {
   summarize,
 } from './measure'
 import { offloadImages, OffloadStorage } from './offload'
+import { compressAll, formatChatSummary, formatConsoleLines } from './compress-all'
 import { FilesUploader } from './files/uploader'
 import { DatabaseBackend, FileStore, MemoryBackend } from './files/store'
 import { FilesTransformResult, transformToFiles } from './files/transform'
@@ -19,6 +20,7 @@ export { isPrivateUrl, offloadImages } from './offload'
 export { FilesUploadError, FilesUploader } from './files/uploader'
 export { DatabaseBackend, FileStore, MemoryBackend } from './files/store'
 export { transformToFiles } from './files/transform'
+export { compressAll, formatChatSummary, formatConsoleLines, summarizeCompress } from './compress-all'
 
 export const name = 'chatluna-request-meter'
 
@@ -433,6 +435,81 @@ async function runOffloadMode(data: any, config: Config) {
   }
 }
 
+let compressRunning = false
+
+/**
+ * 注册 `chatluna.compressall`：强制压缩所有会话。
+ * 需要 authority >= 3；逐条顺序执行，控制台打明细，聊天窗口只回一句摘要。
+ */
+export function registerCompressAllCommand(ctx: Context, logger: any) {
+  ctx.inject(['database'], (ctx2) => {
+    const commandApi = (ctx2 as any).command
+    if (typeof commandApi !== 'function') {
+      logger.warn('[compress-all] 当前环境没有 commands 服务（ctx.command 不可用），跳过指令注册')
+      return
+    }
+    const database = (ctx2 as any).database
+    const chatluna = (ctx2 as any).chatluna
+
+    commandApi
+      .call(ctx2, 'chatluna.compressall [instruction:text]', '强制压缩所有 ChatLuna 会话', { authority: 3 })
+      .option('all', '-a, --all 包含已归档会话')
+      .usage('强制压缩所有会话（跳过 token 阈值），逐条输出结果。可附加一段摘要要求。')
+      .action(async ({ options }: any, instruction: string | undefined) => {
+        if (compressRunning) return '已有压缩任务正在执行，请稍后再试。'
+        const runtime = chatluna?.conversationRuntime
+        if (typeof runtime?.compressConversation !== 'function') {
+          return '当前 ChatLuna 版本不支持批量压缩（缺少 conversationRuntime）。'
+        }
+
+        compressRunning = true
+        const started = Date.now()
+        try {
+          const includeArchived = options.all === true
+          logger.info(
+            `[compress-all] 开始压缩（${includeArchived ? '含归档' : '仅活跃'}${instruction ? '，带自定义摘要要求' : ''}）`,
+          )
+          const results = await compressAll(
+            {
+              list: async (withArchived) =>
+                database.get('chatluna_conversation', withArchived ? {} : { status: 'active' }),
+              isLocked: async (conversation) => {
+                if (!conversation.bindingKey) return false
+                try {
+                  const constraint = await chatluna.conversation.getManagedConstraintByBindingKey(
+                    conversation.bindingKey,
+                  )
+                  return constraint?.lockConversation === true
+                } catch {
+                  return false
+                }
+              },
+              compress: (conversation, text) => runtime.compressConversation(conversation, true, text),
+            },
+            {
+              includeArchived,
+              instruction,
+              onItem: (item, index, total) => {
+                logger.info(`[compress-all] (${index + 1}/${total}) ${item.title} → ${item.status}`)
+              },
+            },
+          )
+
+          for (const line of formatConsoleLines(results)) {
+            logger.info(`[compress-all] ${line}`)
+          }
+          logger.info(`[compress-all] 结束，用时 ${((Date.now() - started) / 1000).toFixed(1)}s`)
+          return formatChatSummary(results)
+        } catch (error: any) {
+          logger.error('[compress-all] 批量压缩异常：', error)
+          return `压缩失败：${String(error?.message ?? error).slice(0, 120)}`
+        } finally {
+          compressRunning = false
+        }
+      })
+  })
+}
+
 export function apply(ctx: Context, config: Config) {
   const logger = ctx.logger('request-meter')
   state.config = config
@@ -472,6 +549,8 @@ export function apply(ctx: Context, config: Config) {
       logger.info('[request-meter] 已接入 chatluna_storage，图片可转存为公网 URL')
     }
   })
+
+  registerCompressAllCommand(ctx, logger)
 
   const { ModelRequester } = require('koishi-plugin-chatluna/llm-core/platform/api')
   const proto = ModelRequester.prototype as any

@@ -116,6 +116,47 @@ filesUploadConcurrency: 4
   插件会记录警告并跳过统计，不影响正常对话。
 - 外链模式下 body 很小是预期行为，不代表服务端不会因为下载图片而变慢或失败。
 
+## 指令：`chatluna.compressall`
+
+强制压缩所有 ChatLuna 会话（跳过 token 阈值），需要 **Koishi 权限 3 级及以上**。
+
+```text
+chatluna.compressall [instruction:text] [-a|--all]
+```
+
+| 参数 | 说明 |
+|---|---|
+| `instruction` | 可选，追加到摘要 Prompt 的额外要求 |
+| `-a, --all` | 连同已归档会话一起压缩 |
+
+行为：
+
+- 按 `lastChatAt` 倒序**串行**压缩（同一平台会争锁，并发没有收益）；
+- 压缩前检查 `lockConversation`，锁定的会话直接跳过，不会报错中断；
+- 单个会话失败只记录，不影响其余会话；
+- 执行期间控制台逐条打印进度与明细，结束后打印合计；
+- 聊天窗口只返回一句摘要（总数、成功/无变化/锁定/失败、减少的 token 比例）。
+
+> 会话的模型/预设必须仍然可用；预设被删或模型下线时该会话会记失败。
+> 同一时间只允许一个批量压缩任务运行。
+
+## 更新日志
+
+### 1.1.0
+
+- 新增 `chatluna.compressall` 指令（authority ≥ 3）：强制压缩所有会话，支持 `-a` 包含归档、可选自定义摘要要求；
+  控制台输出逐条明细与合计，聊天窗口返回简短摘要。
+- 新增 `compress-all` 模块与单元测试（顺序执行、锁检查、失败隔离、摘要格式、指令装配）。
+
+### 1.0.0
+
+- 请求体体积观测：`warnMiB` / `errorMiB` / `abortMiB` 阈值告警，可选超限拦截（避免重试风暴）。
+- 体积估算精度：48 MiB 请求体实测误差 0.000%，日志可列出最大的前 N 张图片。
+- `imageMode: offload`：把 base64 图片转存到 `chatluna_storage`，请求体只留公网 URL。
+- `imageMode: files`：DeepSeek Files API，上传一次换取 `file_id`，多轮复用；
+  支持 hash 去重、内存/数据库映射、400 时自动作废重传。
+- 配置按功能分组（基础 / 体积告警 / 观测与日志 / 图片发送模式 + offload / Files API 条件分支）。
+
 ## License
 
 MIT

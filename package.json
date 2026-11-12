@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-chatluna-request-meter",
   "description": "观测 ChatLuna 每个模型请求的请求体体积（尤其是 base64 图片），在接近供应商上限时告警，可选超限直接拦截；支持不再以 base64 内联图片发送请求，改为公网链接（offload）或 DeepSeek Files API file_id（files）方式上传图片。",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -30,7 +30,7 @@
   "scripts": {
     "build": "node ../../node_modules/typescript/bin/tsc -b tsconfig.json --force && node ../../node_modules/esbuild/bin/esbuild src/index.ts --bundle --platform=node --format=cjs --target=es2022 --packages=external --outfile=lib/index.js",
     "clean": "node ../../node_modules/typescript/bin/tsc -b tsconfig.json --clean",
-    "test": "node test/measure.test.cjs && node test/offload.test.cjs && node test/files-uploader.test.cjs && node test/files-transform.test.cjs && node test/meter.test.cjs"
+    "test": "node test/measure.test.cjs && node test/offload.test.cjs && node test/files-uploader.test.cjs && node test/files-transform.test.cjs && node test/compress-all.test.cjs && node test/compress-command.test.cjs && node test/meter.test.cjs"
   },
   "peerDependencies": {
     "koishi": "^4.18.7",
@@ -38,8 +38,8 @@
   },
   "koishi": {
     "description": {
-      "zh": "观测 ChatLuna 每个模型请求的请求体体积（尤其是 base64 图片），在接近供应商上限时告警，可选超限直接拦截；支持不再以 base64 内联图片发送请求，改为公网链接（offload）或 DeepSeek Files API file_id（files）方式上传图片。挂在 ModelRequester.post 上，DeepSeek / 千问 / OpenAI / MiMo 等全部适配器通用。",
-      "en": "Measure every ChatLuna model request body (especially inline base64 images), warn when approaching provider limits, and optionally block oversized requests. Can stop sending inline base64 images entirely: offload them to a public URL, or upload via the DeepSeek Files API and keep only a file_id. Patched at ModelRequester.post so it works for all adapters."
+      "zh": "观测 ChatLuna 每个模型请求的请求体体积（尤其是 base64 图片），在接近供应商上限时告警，可选超限直接拦截；支持不再以 base64 内联图片发送请求，改为公网链接（offload）或 DeepSeek Files API file_id（files）方式上传图片；另提供 chatluna.compressall 指令（权限 3 级）批量强制压缩所有会话。挂在 ModelRequester.post 上，DeepSeek / 千问 / OpenAI / MiMo 等全部适配器通用。",
+      "en": "Measure every ChatLuna model request body (especially inline base64 images), warn when approaching provider limits, and optionally block oversized requests. Can stop sending inline base64 images entirely: offload them to a public URL, or upload via the DeepSeek Files API and keep only a file_id. Also provides chatluna.compressall (authority 3) to force-compress every conversation. Patched at ModelRequester.post so it works for all adapters."
     },
     "service": {
       "required": [
