@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-chatluna-request-meter",
   "description": "观测 ChatLuna 每个模型请求的请求体体积（尤其是 base64 图片），在接近供应商上限时告警，可选超限直接拦截；支持不再以 base64 内联图片发送请求，改为公网链接（offload）或 DeepSeek Files API file_id（files）方式上传图片。",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [

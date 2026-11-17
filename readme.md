@@ -134,13 +134,33 @@ chatluna.compressall [instruction:text] [-a|--all]
 - 按 `lastChatAt` 倒序**串行**压缩（同一平台会争锁，并发没有收益）；
 - 压缩前检查 `lockConversation`，锁定的会话直接跳过，不会报错中断；
 - 单个会话失败只记录，不影响其余会话；
-- 执行期间控制台逐条打印进度与明细，结束后打印合计；
 - 聊天窗口只返回一句摘要（总数、成功/无变化/锁定/失败、减少的 token 比例）。
+
+输出开关（插件配置「批量压缩」分组，默认都关闭）：
+
+| 配置 | 默认 | 说明 |
+|---|---|---|
+| `compressShowResults` | `false` | 结束时是否在控制台逐条打印每个会话的压缩结果与进度；关闭时只打印合计与耗时 |
+| `compressLogEnabled` | `false` | 是否把每次批量压缩的完整过程输出到本地日志文件 |
+| `compressLogDir` | `data/chatluna` | 日志目录（仅在 `compressLogEnabled` 打开时显示）；支持相对路径（相对 Koishi 工作目录）与绝对路径，自动创建 |
+
+日志文件名为 `compress-all-<本地时间>.log`，包含开始时间、用时、范围、摘要要求与逐条明细。
 
 > 会话的模型/预设必须仍然可用；预设被删或模型下线时该会话会记失败。
 > 同一时间只允许一个批量压缩任务运行。
 
 ## 更新日志
+
+### 1.2.0
+
+- `chatluna.compressall` 新增「批量压缩」配置分组（默认全部关闭，行为更安静）：
+  - `compressShowResults`（默认 `false`）：是否在控制台逐条打印每个会话的压缩结果与进度；关闭时只打印合计与耗时；
+  - `compressLogEnabled`（默认 `false`）：是否把每次批量压缩的完整过程写入本地日志文件；
+  - `compressLogDir`（默认 `data/chatluna`）：日志目录，仅在日志开关打开时显示；支持相对路径（相对 Koishi
+    工作目录）与绝对路径，目录不存在时自动创建。
+- 日志文件名为 `compress-all-<本地时间>.log`，含开始时间、用时、范围、摘要要求与逐条明细；写入失败只告警，不影响指令返回。
+- 配置联动遵循 koishi-schema-config.md 的模式选择式模板（顶层 intersect + union，`const(true).required()` + 空分支兜底），
+  运行时对未命中分支的 `compressLogDir` 使用 `?? 'data/chatluna'` 守卫。
 
 ### 1.1.0
 

@@ -1,6 +1,9 @@
 import type { Context } from 'koishi'
 import { Schema } from 'koishi'
 import { createHash } from 'node:crypto'
+import { mkdir, writeFile } from 'node:fs/promises'
+import process from 'node:process'
+import { join, resolve } from 'node:path'
 import {
   BodyEstimate,
   describeImages,
@@ -54,6 +57,9 @@ export interface Config {
   filesPlatforms: string[]
   filesAccountScoped: boolean
   filesUploadConcurrency: number
+  compressShowResults: boolean
+  compressLogEnabled: boolean
+  compressLogDir: string
 }
 
 export const Config = Schema.intersect([
@@ -169,6 +175,26 @@ export const Config = Schema.intersect([
         .default(4)
         .description('首次上传时的并发数。'),
     }).description('Files API：转存为 file_id'),
+
+    Schema.object({}),
+  ]),
+
+  Schema.object({
+    compressShowResults: Schema.boolean()
+      .default(false)
+      .description('执行结束时是否在控制台逐条打印每个会话的压缩结果（关闭时只打印合计与耗时）。'),
+    compressLogEnabled: Schema.boolean()
+      .default(false)
+      .description('是否把每次批量压缩的完整过程（范围、明细、合计、耗时）输出到本地日志文件。'),
+  }).description('批量压缩（chatluna.compressall）'),
+
+  Schema.union([
+    Schema.object({
+      compressLogEnabled: Schema.const(true).required(),
+      compressLogDir: Schema.string()
+        .default('data/chatluna')
+        .description('压缩日志目录，支持相对路径（相对 Koishi 工作目录）与绝对路径；目录不存在时自动创建。'),
+    }).description('压缩日志输出'),
 
     Schema.object({}),
   ]),
@@ -437,11 +463,55 @@ async function runOffloadMode(data: any, config: Config) {
 
 let compressRunning = false
 
+function localStamp(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+    `T${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}`
+  )
+}
+
+/**
+ * 把一次批量压缩的完整过程写入本地日志。失败只告警，不影响指令返回。
+ * compressLogDir 可能是 undefined（yml 未写 compressLogEnabled: true 时条件分支不生效），
+ * 这里用 ?? 兜底，符合 koishi-schema-config.md 的运行时守卫要求。
+ */
+async function writeCompressLog(opts: {
+  dir: string | undefined
+  lines: string[]
+  includeArchived: boolean
+  instruction?: string
+  startedAt: number
+  elapsedMs: number
+  logger: any
+}) {
+  try {
+    const dir = resolve(process.cwd(), opts.dir ?? 'data/chatluna')
+    await mkdir(dir, { recursive: true })
+    const file = join(dir, `compress-all-${localStamp(new Date(opts.startedAt))}.log`)
+    const text = [
+      '# ChatLuna 批量压缩日志',
+      `- 开始时间：${new Date(opts.startedAt).toLocaleString('zh-CN')}`,
+      `- 用时：${(opts.elapsedMs / 1000).toFixed(1)}s`,
+      `- 范围：${opts.includeArchived ? '全部会话（含归档）' : '仅活跃会话'}`,
+      `- 摘要要求：${opts.instruction?.trim() || '无'}`,
+      '',
+      ...opts.lines,
+      '',
+    ].join('\n')
+    await writeFile(file, text, 'utf8')
+    opts.logger.info(`[compress-all] 压缩日志已写入：${file}`)
+  } catch (error) {
+    opts.logger.warn('[compress-all] 压缩日志写入失败：', error)
+  }
+}
+
 /**
  * 注册 `chatluna.compressall`：强制压缩所有会话。
- * 需要 authority >= 3；逐条顺序执行，控制台打明细，聊天窗口只回一句摘要。
+ * 需要 authority >= 3；逐条顺序执行；明细打印与日志文件由配置开关控制
+ * （默认都关闭，聊天窗口始终只回一句摘要）。
  */
-export function registerCompressAllCommand(ctx: Context, logger: any) {
+export function registerCompressAllCommand(ctx: Context, logger: any, config: Config) {
   ctx.inject(['database'], (ctx2) => {
     const commandApi = (ctx2 as any).command
     if (typeof commandApi !== 'function') {
@@ -454,7 +524,7 @@ export function registerCompressAllCommand(ctx: Context, logger: any) {
     commandApi
       .call(ctx2, 'chatluna.compressall [instruction:text]', '强制压缩所有 ChatLuna 会话', { authority: 3 })
       .option('all', '-a, --all 包含已归档会话')
-      .usage('强制压缩所有会话（跳过 token 阈值），逐条输出结果。可附加一段摘要要求。')
+      .usage('强制压缩所有会话（跳过 token 阈值）。明细/日志输出由插件配置控制；可附加一段摘要要求。')
       .action(async ({ options }: any, instruction: string | undefined) => {
         if (compressRunning) return '已有压缩任务正在执行，请稍后再试。'
         const runtime = chatluna?.conversationRuntime
@@ -466,6 +536,8 @@ export function registerCompressAllCommand(ctx: Context, logger: any) {
         const started = Date.now()
         try {
           const includeArchived = options.all === true
+          const showResults = config.compressShowResults === true
+          const logEnabled = config.compressLogEnabled === true
           logger.info(
             `[compress-all] 开始压缩（${includeArchived ? '含归档' : '仅活跃'}${instruction ? '，带自定义摘要要求' : ''}）`,
           )
@@ -490,15 +562,35 @@ export function registerCompressAllCommand(ctx: Context, logger: any) {
               includeArchived,
               instruction,
               onItem: (item, index, total) => {
-                logger.info(`[compress-all] (${index + 1}/${total}) ${item.title} → ${item.status}`)
+                if (showResults) {
+                  logger.info(`[compress-all] (${index + 1}/${total}) ${item.title} → ${item.status}`)
+                }
               },
             },
           )
 
-          for (const line of formatConsoleLines(results)) {
-            logger.info(`[compress-all] ${line}`)
+          const elapsedMs = Date.now() - started
+          const lines = formatConsoleLines(results)
+          const summaryLine = lines[lines.length - 1]
+          if (showResults) {
+            for (const line of lines.slice(0, -1)) {
+              logger.info(`[compress-all] ${line}`)
+            }
           }
-          logger.info(`[compress-all] 结束，用时 ${((Date.now() - started) / 1000).toFixed(1)}s`)
+          logger.info(`[compress-all] ${summaryLine}`)
+          logger.info(`[compress-all] 结束，用时 ${(elapsedMs / 1000).toFixed(1)}s`)
+
+          if (logEnabled) {
+            await writeCompressLog({
+              dir: config.compressLogDir,
+              lines,
+              includeArchived,
+              instruction,
+              startedAt: started,
+              elapsedMs,
+              logger,
+            })
+          }
           return formatChatSummary(results)
         } catch (error: any) {
           logger.error('[compress-all] 批量压缩异常：', error)
@@ -550,7 +642,7 @@ export function apply(ctx: Context, config: Config) {
     }
   })
 
-  registerCompressAllCommand(ctx, logger)
+  registerCompressAllCommand(ctx, logger, config)
 
   const { ModelRequester } = require('koishi-plugin-chatluna/llm-core/platform/api')
   const proto = ModelRequester.prototype as any
